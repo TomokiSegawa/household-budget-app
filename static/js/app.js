@@ -77,8 +77,10 @@ async function loadMasterData() {
   [categories, accounts] = await Promise.all([api("/api/categories"), api("/api/accounts")]);
   populateCategorySelect("tx-category", currentTxType);
   populateAccountSelect("tx-account");
+  populateAccountSelect("tx-to-account");
   populateCategorySelect("edit-tx-category", editTxType);
   populateAccountSelect("edit-tx-account");
+  populateAccountSelect("edit-tx-to-account");
 }
 
 function populateCategorySelect(selectId, type) {
@@ -106,24 +108,49 @@ function populateAccountSelect(selectId) {
 }
 
 // ---------------------------------------------------------------------------
-// Transaction type toggle
+// Transaction type toggle (shared logic)
 // ---------------------------------------------------------------------------
-function setTxType(type) {
-  currentTxType = type;
-  const be = document.getElementById("btn-expense");
-  const bi = document.getElementById("btn-income");
+function updateTypeToggleUI(prefix, type) {
+  const be = document.getElementById(prefix + "btn-expense");
+  const bi = document.getElementById(prefix + "btn-income");
+  const bt = document.getElementById(prefix + "btn-transfer");
   be.className = type === "expense" ? "active-expense" : "";
   bi.className = type === "income" ? "active-income" : "";
-  populateCategorySelect("tx-category", type);
+  bt.className = type === "transfer" ? "active-transfer" : "";
+
+  // Show/hide category and to-account fields
+  const catGroup = document.getElementById(prefix + "tx-category-group");
+  const toAccGroup = document.getElementById(prefix + "tx-to-account-group");
+  const accLabel = document.getElementById(prefix + "tx-account-label");
+  const catSelect = document.getElementById(prefix + "tx-category");
+
+  if (type === "transfer") {
+    catGroup.style.display = "none";
+    catSelect.removeAttribute("required");
+    toAccGroup.style.display = "";
+    accLabel.textContent = "振替元";
+  } else {
+    catGroup.style.display = "";
+    catSelect.setAttribute("required", "");
+    toAccGroup.style.display = "none";
+    accLabel.textContent = "支払元";
+  }
+}
+
+function setTxType(type) {
+  currentTxType = type;
+  updateTypeToggleUI("", type);
+  if (type !== "transfer") {
+    populateCategorySelect("tx-category", type);
+  }
 }
 
 function setEditTxType(type) {
   editTxType = type;
-  const be = document.getElementById("edit-btn-expense");
-  const bi = document.getElementById("edit-btn-income");
-  be.className = type === "expense" ? "active-expense" : "";
-  bi.className = type === "income" ? "active-income" : "";
-  populateCategorySelect("edit-tx-category", type);
+  updateTypeToggleUI("edit-", type);
+  if (type !== "transfer") {
+    populateCategorySelect("edit-tx-category", type);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,16 +162,59 @@ document.getElementById("tx-form").addEventListener("submit", async (e) => {
     date: document.getElementById("tx-date").value,
     type: currentTxType,
     amount: document.getElementById("tx-amount").value,
-    category_id: document.getElementById("tx-category").value,
-    account_id: document.getElementById("tx-account").value,
     memo: document.getElementById("tx-memo").value,
   };
+
+  if (currentTxType === "transfer") {
+    data.account_id = document.getElementById("tx-account").value;
+    data.to_account_id = document.getElementById("tx-to-account").value;
+    if (data.account_id === data.to_account_id) {
+      alert("振替元と振替先が同じです");
+      return;
+    }
+  } else {
+    data.category_id = document.getElementById("tx-category").value;
+    data.account_id = document.getElementById("tx-account").value;
+  }
+
   await api("/api/transactions", { method: "POST", body: data });
   // Reset form but keep date
   document.getElementById("tx-amount").value = "";
   document.getElementById("tx-memo").value = "";
   loadRecent();
 });
+
+// ---------------------------------------------------------------------------
+// Transaction list rendering (shared)
+// ---------------------------------------------------------------------------
+function renderTxItem(tx) {
+  let categoryDisplay, accountDisplay, amountPrefix, amountClass;
+
+  if (tx.type === "transfer") {
+    categoryDisplay = "振替";
+    accountDisplay = `${tx.account_name} → ${tx.to_account_name || "?"}`;
+    amountPrefix = "";
+    amountClass = "transfer";
+  } else {
+    categoryDisplay = tx.category_name || "";
+    accountDisplay = tx.account_name;
+    amountPrefix = tx.type === "expense" ? "-" : "+";
+    amountClass = tx.type;
+  }
+
+  return `
+    <li class="tx-item">
+      <span class="tx-date">${tx.date}</span>
+      <span class="tx-info">
+        <span class="tx-category">${categoryDisplay}</span>
+        <span class="tx-account-memo">${accountDisplay}${tx.memo ? " / " + escapeHtml(tx.memo) : ""}</span>
+      </span>
+      <span class="tx-amount ${amountClass}">${amountPrefix}${formatMoney(tx.amount)}</span>
+      <span class="tx-actions">
+        <button onclick="openEditModal(${tx.id})">編集</button>
+      </span>
+    </li>`;
+}
 
 // ---------------------------------------------------------------------------
 // Recent transactions (input page)
@@ -157,23 +227,7 @@ async function loadRecent() {
     list.innerHTML = '<li class="empty-state">今月の記録はまだありません</li>';
     return;
   }
-  list.innerHTML = txs
-    .slice(0, 20)
-    .map(
-      (tx) => `
-    <li class="tx-item">
-      <span class="tx-date">${tx.date}</span>
-      <span class="tx-info">
-        <span class="tx-category">${tx.category_name}</span>
-        <span class="tx-account-memo">${tx.account_name}${tx.memo ? " / " + escapeHtml(tx.memo) : ""}</span>
-      </span>
-      <span class="tx-amount ${tx.type}">${tx.type === "expense" ? "-" : "+"}${formatMoney(tx.amount)}</span>
-      <span class="tx-actions">
-        <button onclick="openEditModal(${tx.id})">編集</button>
-      </span>
-    </li>`
-    )
-    .join("");
+  list.innerHTML = txs.slice(0, 20).map(renderTxItem).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -206,22 +260,7 @@ async function loadList() {
     list.innerHTML = '<li class="empty-state">この月の記録はありません</li>';
     return;
   }
-  list.innerHTML = txs
-    .map(
-      (tx) => `
-    <li class="tx-item">
-      <span class="tx-date">${tx.date}</span>
-      <span class="tx-info">
-        <span class="tx-category">${tx.category_name}</span>
-        <span class="tx-account-memo">${tx.account_name}${tx.memo ? " / " + escapeHtml(tx.memo) : ""}</span>
-      </span>
-      <span class="tx-amount ${tx.type}">${tx.type === "expense" ? "-" : "+"}${formatMoney(tx.amount)}</span>
-      <span class="tx-actions">
-        <button onclick="openEditModal(${tx.id})">編集</button>
-      </span>
-    </li>`
-    )
-    .join("");
+  list.innerHTML = txs.map(renderTxItem).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -315,16 +354,48 @@ async function loadBalances() {
   document.getElementById("balance-grid").innerHTML = data.accounts
     .map(
       (a) => `
-    <div class="balance-card">
+    <div class="balance-card" onclick="openBalanceModal(${a.id}, '${escapeHtml(a.name)}', ${a.current_balance})" style="cursor:pointer">
       <div class="account-name">${a.name}</div>
       <div class="account-type">${typeLabels[a.type] || a.type}</div>
       <div class="account-balance" style="color:${a.current_balance >= 0 ? "var(--primary)" : "var(--danger)"}">
         ¥${formatMoney(a.current_balance)}
       </div>
+      <div class="balance-adjust-hint">クリックで残高調整</div>
     </div>`
     )
     .join("");
 }
+
+// ---------------------------------------------------------------------------
+// Balance adjustment modal
+// ---------------------------------------------------------------------------
+function openBalanceModal(accountId, accountName, currentBalance) {
+  document.getElementById("balance-account-id").value = accountId;
+  document.getElementById("balance-account-name").textContent = accountName;
+  document.getElementById("balance-current").textContent = `¥${formatMoney(currentBalance)}`;
+  document.getElementById("balance-new").value = currentBalance;
+  document.getElementById("balance-modal").classList.add("show");
+}
+
+function closeBalanceModal() {
+  document.getElementById("balance-modal").classList.remove("show");
+}
+
+document.getElementById("balance-adjust-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const accountId = document.getElementById("balance-account-id").value;
+  const newBalance = document.getElementById("balance-new").value;
+  await api(`/api/accounts/${accountId}/adjust_balance`, {
+    method: "PUT",
+    body: { balance: parseInt(newBalance) },
+  });
+  closeBalanceModal();
+  loadBalances();
+});
+
+document.getElementById("balance-modal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("balance-modal")) closeBalanceModal();
+});
 
 // ---------------------------------------------------------------------------
 // Budget page
@@ -405,10 +476,14 @@ async function openEditModal(txId) {
   document.getElementById("edit-tx-amount").value = tx.amount;
   document.getElementById("edit-tx-memo").value = tx.memo || "";
 
-  // Wait for category select to populate then set value
-  populateCategorySelect("edit-tx-category", tx.type);
-  document.getElementById("edit-tx-category").value = tx.category_id;
-  document.getElementById("edit-tx-account").value = tx.account_id;
+  if (tx.type === "transfer") {
+    document.getElementById("edit-tx-account").value = tx.account_id;
+    document.getElementById("edit-tx-to-account").value = tx.to_account_id;
+  } else {
+    populateCategorySelect("edit-tx-category", tx.type);
+    document.getElementById("edit-tx-category").value = tx.category_id;
+    document.getElementById("edit-tx-account").value = tx.account_id;
+  }
 
   document.getElementById("edit-modal").classList.add("show");
 }
@@ -424,10 +499,21 @@ document.getElementById("edit-tx-form").addEventListener("submit", async (e) => 
     date: document.getElementById("edit-tx-date").value,
     type: editTxType,
     amount: document.getElementById("edit-tx-amount").value,
-    category_id: document.getElementById("edit-tx-category").value,
-    account_id: document.getElementById("edit-tx-account").value,
     memo: document.getElementById("edit-tx-memo").value,
   };
+
+  if (editTxType === "transfer") {
+    data.account_id = document.getElementById("edit-tx-account").value;
+    data.to_account_id = document.getElementById("edit-tx-to-account").value;
+    if (data.account_id === data.to_account_id) {
+      alert("振替元と振替先が同じです");
+      return;
+    }
+  } else {
+    data.category_id = document.getElementById("edit-tx-category").value;
+    data.account_id = document.getElementById("edit-tx-account").value;
+  }
+
   await api(`/api/transactions/${id}`, { method: "PUT", body: data });
   closeEditModal();
   loadRecent();

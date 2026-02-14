@@ -239,6 +239,12 @@ body {
   color: var(--success);
 }
 
+.type-toggle button.active-transfer {
+  border-color: var(--primary);
+  background: #dbeafe;
+  color: var(--primary);
+}
+
 /* Buttons */
 .btn {
   padding: 0.6rem 1.5rem;
@@ -371,6 +377,10 @@ body {
   color: var(--danger);
 }
 
+.tx-amount.transfer {
+  color: var(--primary);
+}
+
 .tx-actions {
   display: flex;
   gap: 0.25rem;
@@ -469,6 +479,18 @@ body {
 .balance-card .account-balance {
   font-size: 1.3rem;
   font-weight: 700;
+}
+
+.balance-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+  transition: all 0.15s;
+}
+
+.balance-adjust-hint {
+  font-size: 0.7rem;
+  color: var(--gray-400);
+  margin-top: 0.5rem;
 }
 
 .grand-total {
