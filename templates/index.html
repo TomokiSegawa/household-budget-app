@@ -29,9 +29,10 @@
       <h2 class="card-title">収支を記録</h2>
       <form id="tx-form">
         <div class="form-group full-width" style="margin-bottom:0.75rem">
-          <div class="type-toggle">
+          <div class="type-toggle type-toggle-3">
             <button type="button" id="btn-expense" class="active-expense" onclick="setTxType('expense')">支出</button>
             <button type="button" id="btn-income" onclick="setTxType('income')">収入</button>
+            <button type="button" id="btn-transfer" onclick="setTxType('transfer')">振替</button>
           </div>
         </div>
         <div class="form-grid">
@@ -43,13 +44,17 @@
             <label for="tx-amount">金額 (円)</label>
             <input type="number" id="tx-amount" min="1" placeholder="0" required>
           </div>
-          <div class="form-group">
+          <div class="form-group" id="tx-category-group">
             <label for="tx-category">カテゴリ</label>
             <select id="tx-category" required></select>
           </div>
           <div class="form-group">
-            <label for="tx-account">支払元</label>
+            <label for="tx-account" id="tx-account-label">支払元</label>
             <select id="tx-account" required></select>
+          </div>
+          <div class="form-group" id="tx-to-account-group" style="display:none">
+            <label for="tx-to-account">振替先</label>
+            <select id="tx-to-account"></select>
           </div>
           <div class="form-group full-width">
             <label for="tx-memo">メモ</label>
@@ -57,10 +62,8 @@
           </div>
         </div>
         <div class="form-actions">
-          <button type="button" class="btn btn-outline" id="btn-cancel-edit" style="display:none" onclick="cancelEdit()">キャンセル</button>
           <button type="submit" class="btn btn-primary" id="btn-submit-tx">記録する</button>
         </div>
-        <input type="hidden" id="tx-edit-id" value="">
       </form>
     </div>
 
@@ -212,9 +215,10 @@
     <h3>取引を編集</h3>
     <form id="edit-tx-form">
       <div class="form-group" style="margin-bottom:0.75rem">
-        <div class="type-toggle">
+        <div class="type-toggle type-toggle-3">
           <button type="button" id="edit-btn-expense" class="active-expense" onclick="setEditTxType('expense')">支出</button>
           <button type="button" id="edit-btn-income" onclick="setEditTxType('income')">収入</button>
+          <button type="button" id="edit-btn-transfer" onclick="setEditTxType('transfer')">振替</button>
         </div>
       </div>
       <div class="form-grid">
@@ -226,13 +230,17 @@
           <label>金額 (円)</label>
           <input type="number" id="edit-tx-amount" min="1" required>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="edit-tx-category-group">
           <label>カテゴリ</label>
           <select id="edit-tx-category" required></select>
         </div>
         <div class="form-group">
-          <label>支払元</label>
+          <label id="edit-tx-account-label">支払元</label>
           <select id="edit-tx-account" required></select>
+        </div>
+        <div class="form-group" id="edit-tx-to-account-group" style="display:none">
+          <label>振替先</label>
+          <select id="edit-tx-to-account"></select>
         </div>
         <div class="form-group full-width">
           <label>メモ</label>
@@ -245,6 +253,34 @@
         <button type="submit" class="btn btn-primary">更新</button>
       </div>
       <input type="hidden" id="edit-tx-id">
+    </form>
+  </div>
+</div>
+
+<!-- Balance adjustment modal -->
+<div class="modal-overlay" id="balance-modal">
+  <div class="modal">
+    <h3>残高調整</h3>
+    <form id="balance-adjust-form">
+      <div class="form-group" style="margin-bottom:1rem">
+        <label>口座名</label>
+        <div id="balance-account-name" style="font-weight:700;font-size:1.1rem"></div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>現在の残高</label>
+          <div id="balance-current" style="font-weight:700;font-size:1.1rem"></div>
+        </div>
+        <div class="form-group">
+          <label for="balance-new">新しい残高 (円)</label>
+          <input type="number" id="balance-new" required>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-outline" onclick="closeBalanceModal()">キャンセル</button>
+        <button type="submit" class="btn btn-primary">調整する</button>
+      </div>
+      <input type="hidden" id="balance-account-id">
     </form>
   </div>
 </div>

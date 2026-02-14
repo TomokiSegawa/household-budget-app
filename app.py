@@ -50,10 +50,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT NOT NULL,
-            type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
+            type TEXT NOT NULL CHECK(type IN ('income', 'expense', 'transfer')),
             amount INTEGER NOT NULL CHECK(amount > 0),
-            category_id INTEGER NOT NULL REFERENCES categories(id),
+            category_id INTEGER REFERENCES categories(id),
             account_id INTEGER NOT NULL REFERENCES accounts(id),
+            to_account_id INTEGER REFERENCES accounts(id),
             memo TEXT DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         );
@@ -73,24 +74,46 @@ def init_db():
     """
     )
 
+    # Migration: add transfer support to existing DB
+    try:
+        db.execute("SELECT to_account_id FROM transactions LIMIT 1")
+    except sqlite3.OperationalError:
+        db.executescript(
+            """
+            CREATE TABLE transactions_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                type TEXT NOT NULL CHECK(type IN ('income', 'expense', 'transfer')),
+                amount INTEGER NOT NULL CHECK(amount > 0),
+                category_id INTEGER REFERENCES categories(id),
+                account_id INTEGER NOT NULL REFERENCES accounts(id),
+                to_account_id INTEGER REFERENCES accounts(id),
+                memo TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );
+            INSERT INTO transactions_new (id, date, type, amount, category_id, account_id, memo, created_at)
+                SELECT id, date, type, amount, category_id, account_id, memo, created_at FROM transactions;
+            DROP TABLE transactions;
+            ALTER TABLE transactions_new RENAME TO transactions;
+            CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
+            CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id);
+            CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
+        """
+        )
+
     # Insert default categories if empty
     cursor = db.execute("SELECT COUNT(*) FROM categories")
     if cursor.fetchone()[0] == 0:
         expense_categories = [
-            "食費",
-            "日用品",
-            "住居費",
             "水道光熱費",
             "通信費",
-            "交通費",
-            "衣服・美容",
-            "医療・健康",
-            "教育・教養",
-            "趣味・娯楽",
+            "食費",
+            "趣味",
             "交際費",
-            "保険",
-            "税金・社会保険",
-            "その他支出",
+            "交通費",
+            "生活費",
+            "育児",
+            "特別な支出",
         ]
         income_categories = [
             "給与",
@@ -114,9 +137,15 @@ def init_db():
     cursor = db.execute("SELECT COUNT(*) FROM accounts")
     if cursor.fetchone()[0] == 0:
         defaults = [
-            ("現金", "cash", 0),
-            ("銀行口座", "bank", 1),
-            ("クレジットカード", "credit_card", 2),
+            ("楽天キャッシュ", "e_money", 0),
+            ("楽天カード", "credit_card", 1),
+            ("イオンペイ", "e_money", 2),
+            ("PayPay", "e_money", 3),
+            ("財布", "cash", 4),
+            ("Suica", "e_money", 5),
+            ("UFJ_渋谷中央支店", "bank", 6),
+            ("UFJ_和光支店", "bank", 7),
+            ("楽天銀行", "bank", 8),
         ]
         for name, atype, order in defaults:
             db.execute(
@@ -203,10 +232,12 @@ def api_transactions():
 
     query = """
         SELECT t.*, c.name AS category_name, c.type AS category_type,
-               a.name AS account_name
+               a.name AS account_name,
+               a2.name AS to_account_name
         FROM transactions t
-        JOIN categories c ON t.category_id = c.id
+        LEFT JOIN categories c ON t.category_id = c.id
         JOIN accounts a ON t.account_id = a.id
+        LEFT JOIN accounts a2 ON t.to_account_id = a2.id
     """
     conditions = []
     params = []
@@ -214,8 +245,8 @@ def api_transactions():
         conditions.append("strftime('%Y-%m', t.date) = ?")
         params.append(year_month)
     if account_id:
-        conditions.append("t.account_id = ?")
-        params.append(int(account_id))
+        conditions.append("(t.account_id = ? OR t.to_account_id = ?)")
+        params.extend([int(account_id), int(account_id)])
     if category_id:
         conditions.append("t.category_id = ?")
         params.append(int(category_id))
@@ -231,17 +262,32 @@ def api_transactions():
 def api_add_transaction():
     data = request.get_json()
     db = get_db()
-    db.execute(
-        "INSERT INTO transactions (date, type, amount, category_id, account_id, memo) VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            data["date"],
-            data["type"],
-            int(data["amount"]),
-            int(data["category_id"]),
-            int(data["account_id"]),
-            data.get("memo", ""),
-        ),
-    )
+    tx_type = data["type"]
+
+    if tx_type == "transfer":
+        db.execute(
+            "INSERT INTO transactions (date, type, amount, account_id, to_account_id, memo) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                data["date"],
+                "transfer",
+                int(data["amount"]),
+                int(data["account_id"]),
+                int(data["to_account_id"]),
+                data.get("memo", ""),
+            ),
+        )
+    else:
+        db.execute(
+            "INSERT INTO transactions (date, type, amount, category_id, account_id, memo) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                data["date"],
+                tx_type,
+                int(data["amount"]),
+                int(data["category_id"]),
+                int(data["account_id"]),
+                data.get("memo", ""),
+            ),
+        )
     db.commit()
     return jsonify({"ok": True}), 201
 
@@ -250,20 +296,38 @@ def api_add_transaction():
 def api_update_transaction(tid):
     data = request.get_json()
     db = get_db()
-    db.execute(
-        """UPDATE transactions
-           SET date=?, type=?, amount=?, category_id=?, account_id=?, memo=?
-           WHERE id=?""",
-        (
-            data["date"],
-            data["type"],
-            int(data["amount"]),
-            int(data["category_id"]),
-            int(data["account_id"]),
-            data.get("memo", ""),
-            tid,
-        ),
-    )
+    tx_type = data["type"]
+
+    if tx_type == "transfer":
+        db.execute(
+            """UPDATE transactions
+               SET date=?, type=?, amount=?, category_id=NULL, account_id=?, to_account_id=?, memo=?
+               WHERE id=?""",
+            (
+                data["date"],
+                "transfer",
+                int(data["amount"]),
+                int(data["account_id"]),
+                int(data["to_account_id"]),
+                data.get("memo", ""),
+                tid,
+            ),
+        )
+    else:
+        db.execute(
+            """UPDATE transactions
+               SET date=?, type=?, amount=?, category_id=?, account_id=?, to_account_id=NULL, memo=?
+               WHERE id=?""",
+            (
+                data["date"],
+                tx_type,
+                int(data["amount"]),
+                int(data["category_id"]),
+                int(data["account_id"]),
+                data.get("memo", ""),
+                tid,
+            ),
+        )
     db.commit()
     return jsonify({"ok": True})
 
@@ -286,7 +350,7 @@ def api_summary():
     year_month = request.args.get("year_month", date.today().strftime("%Y-%m"))
     year, month = map(int, year_month.split("-"))
 
-    # Current month totals by category
+    # Current month totals by category (excludes transfers automatically via JOIN)
     rows = db.execute(
         """
         SELECT c.id AS category_id, c.name AS category_name, c.type,
@@ -371,10 +435,12 @@ def api_balances():
     rows = db.execute(
         """
         SELECT a.id, a.name, a.type, a.initial_balance,
-               COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0) AS total_income,
-               COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) AS total_expense
+               COALESCE(SUM(CASE WHEN t.type = 'income' AND t.account_id = a.id THEN t.amount ELSE 0 END), 0) AS total_income,
+               COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.account_id = a.id THEN t.amount ELSE 0 END), 0) AS total_expense,
+               COALESCE(SUM(CASE WHEN t.type = 'transfer' AND t.account_id = a.id THEN t.amount ELSE 0 END), 0) AS transfer_out,
+               COALESCE(SUM(CASE WHEN t.type = 'transfer' AND t.to_account_id = a.id THEN t.amount ELSE 0 END), 0) AS transfer_in
         FROM accounts a
-        LEFT JOIN transactions t ON t.account_id = a.id
+        LEFT JOIN transactions t ON t.account_id = a.id OR t.to_account_id = a.id
         GROUP BY a.id
         ORDER BY a.sort_order
     """
@@ -384,12 +450,55 @@ def api_balances():
     grand_total = 0
     for r in rows:
         d = dict(r)
-        balance = d["initial_balance"] + d["total_income"] - d["total_expense"]
+        balance = d["initial_balance"] + d["total_income"] - d["total_expense"] + d["transfer_in"] - d["transfer_out"]
         d["current_balance"] = balance
         grand_total += balance
         result.append(d)
 
     return jsonify({"accounts": result, "grand_total": grand_total})
+
+
+# ---------------------------------------------------------------------------
+# API: Balance adjustment
+# ---------------------------------------------------------------------------
+@app.route("/api/accounts/<int:aid>/adjust_balance", methods=["PUT"])
+def api_adjust_balance(aid):
+    """Adjust an account's balance by modifying initial_balance."""
+    data = request.get_json()
+    desired_balance = int(data["balance"])
+    db = get_db()
+
+    row = db.execute(
+        """
+        SELECT a.initial_balance,
+               COALESCE(SUM(CASE WHEN t.type = 'income' AND t.account_id = a.id THEN t.amount ELSE 0 END), 0) AS total_income,
+               COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.account_id = a.id THEN t.amount ELSE 0 END), 0) AS total_expense,
+               COALESCE(SUM(CASE WHEN t.type = 'transfer' AND t.account_id = a.id THEN t.amount ELSE 0 END), 0) AS transfer_out,
+               COALESCE(SUM(CASE WHEN t.type = 'transfer' AND t.to_account_id = a.id THEN t.amount ELSE 0 END), 0) AS transfer_in
+        FROM accounts a
+        LEFT JOIN transactions t ON t.account_id = a.id OR t.to_account_id = a.id
+        WHERE a.id = ?
+        GROUP BY a.id
+    """,
+        (aid,),
+    ).fetchone()
+
+    if not row:
+        return jsonify({"error": "口座が見つかりません"}), 404
+
+    current_balance = (
+        row["initial_balance"]
+        + row["total_income"]
+        - row["total_expense"]
+        + row["transfer_in"]
+        - row["transfer_out"]
+    )
+    diff = desired_balance - current_balance
+    new_initial = row["initial_balance"] + diff
+
+    db.execute("UPDATE accounts SET initial_balance = ? WHERE id = ?", (new_initial, aid))
+    db.commit()
+    return jsonify({"ok": True, "new_balance": desired_balance})
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +554,7 @@ def api_monthly_trend():
                SUM(CASE WHEN type='income' THEN amount ELSE 0 END) AS income,
                SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) AS expense
         FROM transactions
+        WHERE type != 'transfer'
         GROUP BY ym
         ORDER BY ym DESC
         LIMIT ?
