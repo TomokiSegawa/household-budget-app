@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>家計簿アプリ</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- Navigation -->
+<nav class="navbar">
+  <h1>家計簿</h1>
+  <ul class="nav-links">
+    <li><button class="active" data-page="input">入力</button></li>
+    <li><button data-page="list">明細</button></li>
+    <li><button data-page="summary">集計</button></li>
+    <li><button data-page="balance">残高</button></li>
+    <li><button data-page="budget">予算</button></li>
+    <li><button data-page="settings">設定</button></li>
+  </ul>
+</nav>
+
+<div class="container">
+
+  <!-- ===================== Page: Input ===================== -->
+  <div id="page-input" class="page active">
+    <div class="card">
+      <h2 class="card-title">収支を記録</h2>
+      <form id="tx-form">
+        <div class="form-group full-width" style="margin-bottom:0.75rem">
+          <div class="type-toggle">
+            <button type="button" id="btn-expense" class="active-expense" onclick="setTxType('expense')">支出</button>
+            <button type="button" id="btn-income" onclick="setTxType('income')">収入</button>
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="tx-date">日付</label>
+            <input type="date" id="tx-date" required>
+          </div>
+          <div class="form-group">
+            <label for="tx-amount">金額 (円)</label>
+            <input type="number" id="tx-amount" min="1" placeholder="0" required>
+          </div>
+          <div class="form-group">
+            <label for="tx-category">カテゴリ</label>
+            <select id="tx-category" required></select>
+          </div>
+          <div class="form-group">
+            <label for="tx-account">支払元</label>
+            <select id="tx-account" required></select>
+          </div>
+          <div class="form-group full-width">
+            <label for="tx-memo">メモ</label>
+            <input type="text" id="tx-memo" placeholder="メモ（任意）">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-outline" id="btn-cancel-edit" style="display:none" onclick="cancelEdit()">キャンセル</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-tx">記録する</button>
+        </div>
+        <input type="hidden" id="tx-edit-id" value="">
+      </form>
+    </div>
+
+    <!-- Recent transactions -->
+    <div class="card">
+      <h2 class="card-title">最近の記録</h2>
+      <ul class="tx-list" id="recent-tx-list"></ul>
+    </div>
+  </div>
+
+  <!-- ===================== Page: List ===================== -->
+  <div id="page-list" class="page">
+    <div class="month-nav">
+      <button onclick="changeListMonth(-1)">&laquo; 前月</button>
+      <span class="current-month" id="list-month-label"></span>
+      <button onclick="changeListMonth(1)">翌月 &raquo;</button>
+    </div>
+    <div class="summary-row" id="list-summary-row"></div>
+    <div class="card">
+      <h2 class="card-title">明細一覧</h2>
+      <ul class="tx-list" id="full-tx-list"></ul>
+    </div>
+  </div>
+
+  <!-- ===================== Page: Summary ===================== -->
+  <div id="page-summary" class="page">
+    <div class="month-nav">
+      <button onclick="changeSummaryMonth(-1)">&laquo; 前月</button>
+      <span class="current-month" id="summary-month-label"></span>
+      <button onclick="changeSummaryMonth(1)">翌月 &raquo;</button>
+    </div>
+    <div class="summary-row" id="summary-row"></div>
+    <div class="card">
+      <h2 class="card-title">支出カテゴリ別</h2>
+      <table class="summary-table" id="expense-summary-table">
+        <thead>
+          <tr>
+            <th>カテゴリ</th>
+            <th>今月</th>
+            <th>予算</th>
+            <th>前月</th>
+            <th>前年同月</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2 class="card-title">収入カテゴリ別</h2>
+      <table class="summary-table" id="income-summary-table">
+        <thead>
+          <tr>
+            <th>カテゴリ</th>
+            <th>今月</th>
+            <th>前月</th>
+            <th>前年同月</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ===================== Page: Balance ===================== -->
+  <div id="page-balance" class="page">
+    <div class="grand-total">
+      <div class="label">総資産</div>
+      <div class="value" id="grand-total-value">-</div>
+    </div>
+    <div class="balance-grid" id="balance-grid"></div>
+  </div>
+
+  <!-- ===================== Page: Budget ===================== -->
+  <div id="page-budget" class="page">
+    <div class="month-nav">
+      <button onclick="changeBudgetMonth(-1)">&laquo; 前月</button>
+      <span class="current-month" id="budget-month-label"></span>
+      <button onclick="changeBudgetMonth(1)">翌月 &raquo;</button>
+    </div>
+    <div class="card">
+      <h2 class="card-title">月間予算設定 (支出カテゴリ)</h2>
+      <form id="budget-form">
+        <table class="budget-form-table" id="budget-table">
+          <thead><tr><th style="text-align:left">カテゴリ</th><th style="text-align:right">予算額 (円)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="form-actions">
+          <button type="button" class="btn btn-outline" onclick="copyPrevBudget()">前月からコピー</button>
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ===================== Page: Settings ===================== -->
+  <div id="page-settings" class="page">
+    <div class="card">
+      <h2 class="card-title">カテゴリ追加</h2>
+      <form id="category-form" class="form-grid">
+        <div class="form-group">
+          <label for="cat-name">カテゴリ名</label>
+          <input type="text" id="cat-name" required>
+        </div>
+        <div class="form-group">
+          <label for="cat-type">種類</label>
+          <select id="cat-type">
+            <option value="expense">支出</option>
+            <option value="income">収入</option>
+          </select>
+        </div>
+        <div class="form-group full-width">
+          <button type="submit" class="btn btn-primary">追加</button>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <h2 class="card-title">口座追加</h2>
+      <form id="account-form" class="form-grid">
+        <div class="form-group">
+          <label for="acc-name">口座名</label>
+          <input type="text" id="acc-name" required>
+        </div>
+        <div class="form-group">
+          <label for="acc-type">種類</label>
+          <select id="acc-type">
+            <option value="bank">銀行口座</option>
+            <option value="cash">現金</option>
+            <option value="credit_card">クレジットカード</option>
+            <option value="e_money">電子マネー</option>
+            <option value="other">その他</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="acc-balance">初期残高 (円)</label>
+          <input type="number" id="acc-balance" value="0">
+        </div>
+        <div class="form-group full-width">
+          <button type="submit" class="btn btn-primary">追加</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<!-- Edit modal -->
+<div class="modal-overlay" id="edit-modal">
+  <div class="modal">
+    <h3>取引を編集</h3>
+    <form id="edit-tx-form">
+      <div class="form-group" style="margin-bottom:0.75rem">
+        <div class="type-toggle">
+          <button type="button" id="edit-btn-expense" class="active-expense" onclick="setEditTxType('expense')">支出</button>
+          <button type="button" id="edit-btn-income" onclick="setEditTxType('income')">収入</button>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>日付</label>
+          <input type="date" id="edit-tx-date" required>
+        </div>
+        <div class="form-group">
+          <label>金額 (円)</label>
+          <input type="number" id="edit-tx-amount" min="1" required>
+        </div>
+        <div class="form-group">
+          <label>カテゴリ</label>
+          <select id="edit-tx-category" required></select>
+        </div>
+        <div class="form-group">
+          <label>支払元</label>
+          <select id="edit-tx-account" required></select>
+        </div>
+        <div class="form-group full-width">
+          <label>メモ</label>
+          <input type="text" id="edit-tx-memo">
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-outline" onclick="closeEditModal()">キャンセル</button>
+        <button type="button" class="btn btn-danger btn-sm" id="edit-delete-btn">削除</button>
+        <button type="submit" class="btn btn-primary">更新</button>
+      </div>
+      <input type="hidden" id="edit-tx-id">
+    </form>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
