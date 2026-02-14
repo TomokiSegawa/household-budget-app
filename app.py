@@ -4,7 +4,10 @@ from datetime import datetime, date
 from flask import Flask, render_template, request, jsonify, g
 
 app = Flask(__name__)
-DATABASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kakeibo.db")
+DATABASE = os.environ.get(
+    "DATABASE_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "kakeibo.db"),
+)
 
 
 def get_db():
@@ -453,6 +456,8 @@ def api_monthly_trend():
     return jsonify(result)
 
 
+# Initialize database on startup (works with both direct run and gunicorn)
+init_db()
+
 if __name__ == "__main__":
-    init_db()
     app.run(debug=True, port=5001)
