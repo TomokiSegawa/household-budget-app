@@ -4,17 +4,43 @@ from datetime import datetime, date
 from flask import Flask, render_template, request, jsonify, g
 
 app = Flask(__name__)
-DATABASE = os.environ.get(
-    "DATABASE_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "kakeibo.db"),
-)
+
+# ---------------------------------------------------------------------------
+# Database configuration: PostgreSQL (production) or SQLite (development)
+# Set DATABASE_URL for PostgreSQL, otherwise falls back to SQLite.
+# ---------------------------------------------------------------------------
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if DATABASE_URL:
+    # Render.com provides postgres:// but psycopg2 requires postgresql://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    import psycopg2
+    import psycopg2.extras
+
+    DB_TYPE = "postgresql"
+    DBIntegrityError = psycopg2.IntegrityError
+else:
+    DB_TYPE = "sqlite"
+    DATABASE_PATH = os.environ.get(
+        "DATABASE_PATH",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "kakeibo.db"),
+    )
+    DBIntegrityError = sqlite3.IntegrityError
 
 
+# ---------------------------------------------------------------------------
+# Connection helpers
+# ---------------------------------------------------------------------------
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        if DB_TYPE == "postgresql":
+            g.db = psycopg2.connect(
+                DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor
+            )
+        else:
+            g.db = sqlite3.connect(DATABASE_PATH)
+            g.db.row_factory = sqlite3.Row
+            g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
 
@@ -25,8 +51,162 @@ def close_db(exception):
         db.close()
 
 
+def db_execute(sql, params=None):
+    """Execute SQL with automatic placeholder conversion for PostgreSQL."""
+    db = get_db()
+    if DB_TYPE == "postgresql":
+        sql = sql.replace("?", "%s")
+        cur = db.cursor()
+        cur.execute(sql, params or ())
+        return cur
+    else:
+        return db.execute(sql, params or ())
+
+
+def db_commit():
+    get_db().commit()
+
+
+def db_rollback():
+    """Rollback current transaction (needed for PostgreSQL after errors)."""
+    if DB_TYPE == "postgresql":
+        get_db().rollback()
+
+
+# ---------------------------------------------------------------------------
+# Database initialization
+# ---------------------------------------------------------------------------
 def init_db():
-    db = sqlite3.connect(DATABASE)
+    if DB_TYPE == "postgresql":
+        _init_db_postgresql()
+    else:
+        _init_db_sqlite()
+
+
+def _init_db_postgresql():
+    conn = psycopg2.connect(
+        DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor
+    )
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS accounts (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            type TEXT NOT NULL CHECK(type IN ('cash', 'bank', 'credit_card', 'e_money', 'other')),
+            initial_balance INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS categories (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(name, type)
+        )
+    """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS transactions (
+            id SERIAL PRIMARY KEY,
+            date TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('income', 'expense', 'transfer')),
+            amount INTEGER NOT NULL CHECK(amount > 0),
+            category_id INTEGER REFERENCES categories(id),
+            account_id INTEGER NOT NULL REFERENCES accounts(id),
+            to_account_id INTEGER REFERENCES accounts(id),
+            memo TEXT DEFAULT '',
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS budgets (
+            id SERIAL PRIMARY KEY,
+            category_id INTEGER NOT NULL REFERENCES categories(id),
+            year_month TEXT NOT NULL,
+            amount INTEGER NOT NULL CHECK(amount >= 0),
+            UNIQUE(category_id, year_month)
+        )
+    """
+    )
+
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_category ON transactions(category_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_budgets_year_month ON budgets(year_month)"
+    )
+
+    # Insert default categories if empty
+    cur.execute("SELECT COUNT(*) AS cnt FROM categories")
+    if cur.fetchone()["cnt"] == 0:
+        expense_categories = [
+            "水道光熱費",
+            "通信費",
+            "食費",
+            "趣味",
+            "交際費",
+            "交通費",
+            "生活費",
+            "育児",
+            "特別な支出",
+        ]
+        income_categories = ["給与", "賞与", "副業", "投資収益", "その他収入"]
+        for i, name in enumerate(expense_categories):
+            cur.execute(
+                "INSERT INTO categories (name, type, sort_order) VALUES (%s, 'expense', %s)",
+                (name, i),
+            )
+        for i, name in enumerate(income_categories):
+            cur.execute(
+                "INSERT INTO categories (name, type, sort_order) VALUES (%s, 'income', %s)",
+                (name, i),
+            )
+
+    # Insert default accounts if empty
+    cur.execute("SELECT COUNT(*) AS cnt FROM accounts")
+    if cur.fetchone()["cnt"] == 0:
+        defaults = [
+            ("楽天キャッシュ", "e_money", 0),
+            ("楽天カード", "credit_card", 1),
+            ("イオンペイ", "e_money", 2),
+            ("PayPay", "e_money", 3),
+            ("財布", "cash", 4),
+            ("Suica", "e_money", 5),
+            ("UFJ_渋谷中央支店", "bank", 6),
+            ("UFJ_和光支店", "bank", 7),
+            ("楽天銀行", "bank", 8),
+        ]
+        for name, atype, order in defaults:
+            cur.execute(
+                "INSERT INTO accounts (name, type, sort_order) VALUES (%s, %s, %s)",
+                (name, atype, order),
+            )
+
+    conn.commit()
+    conn.close()
+
+
+def _init_db_sqlite():
+    db = sqlite3.connect(DATABASE_PATH)
     db.execute("PRAGMA foreign_keys = ON")
     db.executescript(
         """
@@ -115,13 +295,7 @@ def init_db():
             "育児",
             "特別な支出",
         ]
-        income_categories = [
-            "給与",
-            "賞与",
-            "副業",
-            "投資収益",
-            "その他収入",
-        ]
+        income_categories = ["給与", "賞与", "副業", "投資収益", "その他収入"]
         for i, name in enumerate(expense_categories):
             db.execute(
                 "INSERT INTO categories (name, type, sort_order) VALUES (?, 'expense', ?)",
@@ -170,23 +344,24 @@ def index():
 # ---------------------------------------------------------------------------
 @app.route("/api/categories")
 def api_categories():
-    db = get_db()
-    rows = db.execute("SELECT * FROM categories ORDER BY type, sort_order").fetchall()
+    rows = db_execute(
+        "SELECT * FROM categories ORDER BY type, sort_order"
+    ).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
 @app.route("/api/categories", methods=["POST"])
 def api_add_category():
     data = request.get_json()
-    db = get_db()
     try:
-        db.execute(
+        db_execute(
             "INSERT INTO categories (name, type, sort_order) VALUES (?, ?, ?)",
             (data["name"], data["type"], data.get("sort_order", 0)),
         )
-        db.commit()
+        db_commit()
         return jsonify({"ok": True}), 201
-    except sqlite3.IntegrityError:
+    except DBIntegrityError:
+        db_rollback()
         return jsonify({"error": "同名のカテゴリが既に存在します"}), 400
 
 
@@ -195,17 +370,15 @@ def api_add_category():
 # ---------------------------------------------------------------------------
 @app.route("/api/accounts")
 def api_accounts():
-    db = get_db()
-    rows = db.execute("SELECT * FROM accounts ORDER BY sort_order").fetchall()
+    rows = db_execute("SELECT * FROM accounts ORDER BY sort_order").fetchall()
     return jsonify([dict(r) for r in rows])
 
 
 @app.route("/api/accounts", methods=["POST"])
 def api_add_account():
     data = request.get_json()
-    db = get_db()
     try:
-        db.execute(
+        db_execute(
             "INSERT INTO accounts (name, type, initial_balance, sort_order) VALUES (?, ?, ?, ?)",
             (
                 data["name"],
@@ -214,9 +387,10 @@ def api_add_account():
                 data.get("sort_order", 0),
             ),
         )
-        db.commit()
+        db_commit()
         return jsonify({"ok": True}), 201
-    except sqlite3.IntegrityError:
+    except DBIntegrityError:
+        db_rollback()
         return jsonify({"error": "同名の口座が既に存在します"}), 400
 
 
@@ -225,7 +399,6 @@ def api_add_account():
 # ---------------------------------------------------------------------------
 @app.route("/api/transactions")
 def api_transactions():
-    db = get_db()
     year_month = request.args.get("year_month")  # e.g. "2026-02"
     account_id = request.args.get("account_id")
     category_id = request.args.get("category_id")
@@ -242,7 +415,7 @@ def api_transactions():
     conditions = []
     params = []
     if year_month:
-        conditions.append("strftime('%Y-%m', t.date) = ?")
+        conditions.append("SUBSTR(t.date, 1, 7) = ?")
         params.append(year_month)
     if account_id:
         conditions.append("(t.account_id = ? OR t.to_account_id = ?)")
@@ -254,18 +427,17 @@ def api_transactions():
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY t.date DESC, t.id DESC"
 
-    rows = db.execute(query, params).fetchall()
+    rows = db_execute(query, params).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
 @app.route("/api/transactions", methods=["POST"])
 def api_add_transaction():
     data = request.get_json()
-    db = get_db()
     tx_type = data["type"]
 
     if tx_type == "transfer":
-        db.execute(
+        db_execute(
             "INSERT INTO transactions (date, type, amount, account_id, to_account_id, memo) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 data["date"],
@@ -277,7 +449,7 @@ def api_add_transaction():
             ),
         )
     else:
-        db.execute(
+        db_execute(
             "INSERT INTO transactions (date, type, amount, category_id, account_id, memo) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 data["date"],
@@ -288,18 +460,17 @@ def api_add_transaction():
                 data.get("memo", ""),
             ),
         )
-    db.commit()
+    db_commit()
     return jsonify({"ok": True}), 201
 
 
 @app.route("/api/transactions/<int:tid>", methods=["PUT"])
 def api_update_transaction(tid):
     data = request.get_json()
-    db = get_db()
     tx_type = data["type"]
 
     if tx_type == "transfer":
-        db.execute(
+        db_execute(
             """UPDATE transactions
                SET date=?, type=?, amount=?, category_id=NULL, account_id=?, to_account_id=?, memo=?
                WHERE id=?""",
@@ -314,7 +485,7 @@ def api_update_transaction(tid):
             ),
         )
     else:
-        db.execute(
+        db_execute(
             """UPDATE transactions
                SET date=?, type=?, amount=?, category_id=?, account_id=?, to_account_id=NULL, memo=?
                WHERE id=?""",
@@ -328,15 +499,14 @@ def api_update_transaction(tid):
                 tid,
             ),
         )
-    db.commit()
+    db_commit()
     return jsonify({"ok": True})
 
 
 @app.route("/api/transactions/<int:tid>", methods=["DELETE"])
 def api_delete_transaction(tid):
-    db = get_db()
-    db.execute("DELETE FROM transactions WHERE id=?", (tid,))
-    db.commit()
+    db_execute("DELETE FROM transactions WHERE id=?", (tid,))
+    db_commit()
     return jsonify({"ok": True})
 
 
@@ -346,19 +516,18 @@ def api_delete_transaction(tid):
 @app.route("/api/summary")
 def api_summary():
     """Return category-level totals for a given month, plus comparison data."""
-    db = get_db()
     year_month = request.args.get("year_month", date.today().strftime("%Y-%m"))
     year, month = map(int, year_month.split("-"))
 
     # Current month totals by category (excludes transfers automatically via JOIN)
-    rows = db.execute(
+    rows = db_execute(
         """
         SELECT c.id AS category_id, c.name AS category_name, c.type,
                COALESCE(SUM(t.amount), 0) AS total
         FROM categories c
         LEFT JOIN transactions t
-          ON t.category_id = c.id AND strftime('%Y-%m', t.date) = ?
-        GROUP BY c.id
+          ON t.category_id = c.id AND SUBSTR(t.date, 1, 7) = ?
+        GROUP BY c.id, c.name, c.type, c.sort_order
         ORDER BY c.type, c.sort_order
     """,
         (year_month,),
@@ -369,12 +538,12 @@ def api_summary():
         prev_ym = f"{year - 1}-12"
     else:
         prev_ym = f"{year}-{month - 1:02d}"
-    prev_rows = db.execute(
+    prev_rows = db_execute(
         """
         SELECT c.id AS category_id, COALESCE(SUM(t.amount), 0) AS total
         FROM categories c
         LEFT JOIN transactions t
-          ON t.category_id = c.id AND strftime('%Y-%m', t.date) = ?
+          ON t.category_id = c.id AND SUBSTR(t.date, 1, 7) = ?
         GROUP BY c.id
     """,
         (prev_ym,),
@@ -383,12 +552,12 @@ def api_summary():
 
     # Same month last year
     prev_year_ym = f"{year - 1}-{month:02d}"
-    prev_year_rows = db.execute(
+    prev_year_rows = db_execute(
         """
         SELECT c.id AS category_id, COALESCE(SUM(t.amount), 0) AS total
         FROM categories c
         LEFT JOIN transactions t
-          ON t.category_id = c.id AND strftime('%Y-%m', t.date) = ?
+          ON t.category_id = c.id AND SUBSTR(t.date, 1, 7) = ?
         GROUP BY c.id
     """,
         (prev_year_ym,),
@@ -396,7 +565,7 @@ def api_summary():
     prev_year_map = {r["category_id"]: r["total"] for r in prev_year_rows}
 
     # Budgets for current month
-    budget_rows = db.execute(
+    budget_rows = db_execute(
         "SELECT category_id, amount FROM budgets WHERE year_month = ?",
         (year_month,),
     ).fetchall()
@@ -431,8 +600,7 @@ def api_summary():
 # ---------------------------------------------------------------------------
 @app.route("/api/balances")
 def api_balances():
-    db = get_db()
-    rows = db.execute(
+    rows = db_execute(
         """
         SELECT a.id, a.name, a.type, a.initial_balance,
                COALESCE(SUM(CASE WHEN t.type = 'income' AND t.account_id = a.id THEN t.amount ELSE 0 END), 0) AS total_income,
@@ -441,7 +609,7 @@ def api_balances():
                COALESCE(SUM(CASE WHEN t.type = 'transfer' AND t.to_account_id = a.id THEN t.amount ELSE 0 END), 0) AS transfer_in
         FROM accounts a
         LEFT JOIN transactions t ON t.account_id = a.id OR t.to_account_id = a.id
-        GROUP BY a.id
+        GROUP BY a.id, a.name, a.type, a.initial_balance, a.sort_order
         ORDER BY a.sort_order
     """
     ).fetchall()
@@ -450,7 +618,13 @@ def api_balances():
     grand_total = 0
     for r in rows:
         d = dict(r)
-        balance = d["initial_balance"] + d["total_income"] - d["total_expense"] + d["transfer_in"] - d["transfer_out"]
+        balance = (
+            d["initial_balance"]
+            + d["total_income"]
+            - d["total_expense"]
+            + d["transfer_in"]
+            - d["transfer_out"]
+        )
         d["current_balance"] = balance
         grand_total += balance
         result.append(d)
@@ -466,9 +640,8 @@ def api_adjust_balance(aid):
     """Adjust an account's balance by modifying initial_balance."""
     data = request.get_json()
     desired_balance = int(data["balance"])
-    db = get_db()
 
-    row = db.execute(
+    row = db_execute(
         """
         SELECT a.initial_balance,
                COALESCE(SUM(CASE WHEN t.type = 'income' AND t.account_id = a.id THEN t.amount ELSE 0 END), 0) AS total_income,
@@ -478,7 +651,7 @@ def api_adjust_balance(aid):
         FROM accounts a
         LEFT JOIN transactions t ON t.account_id = a.id OR t.to_account_id = a.id
         WHERE a.id = ?
-        GROUP BY a.id
+        GROUP BY a.id, a.initial_balance
     """,
         (aid,),
     ).fetchone()
@@ -496,8 +669,10 @@ def api_adjust_balance(aid):
     diff = desired_balance - current_balance
     new_initial = row["initial_balance"] + diff
 
-    db.execute("UPDATE accounts SET initial_balance = ? WHERE id = ?", (new_initial, aid))
-    db.commit()
+    db_execute(
+        "UPDATE accounts SET initial_balance = ? WHERE id = ?", (new_initial, aid)
+    )
+    db_commit()
     return jsonify({"ok": True, "new_balance": desired_balance})
 
 
@@ -506,9 +681,8 @@ def api_adjust_balance(aid):
 # ---------------------------------------------------------------------------
 @app.route("/api/budgets")
 def api_budgets():
-    db = get_db()
     year_month = request.args.get("year_month", date.today().strftime("%Y-%m"))
-    rows = db.execute(
+    rows = db_execute(
         """
         SELECT b.id, b.category_id, c.name AS category_name, b.year_month, b.amount
         FROM budgets b
@@ -525,10 +699,9 @@ def api_budgets():
 def api_save_budgets():
     """Save/update budgets. Expects {year_month, budgets: [{category_id, amount}]}."""
     data = request.get_json()
-    db = get_db()
     year_month = data["year_month"]
     for item in data["budgets"]:
-        db.execute(
+        db_execute(
             """
             INSERT INTO budgets (category_id, year_month, amount)
             VALUES (?, ?, ?)
@@ -537,7 +710,7 @@ def api_save_budgets():
         """,
             (int(item["category_id"]), year_month, int(item["amount"])),
         )
-    db.commit()
+    db_commit()
     return jsonify({"ok": True})
 
 
@@ -546,17 +719,16 @@ def api_save_budgets():
 # ---------------------------------------------------------------------------
 @app.route("/api/monthly_trend")
 def api_monthly_trend():
-    db = get_db()
     months = int(request.args.get("months", 12))
-    rows = db.execute(
+    rows = db_execute(
         """
-        SELECT strftime('%Y-%m', date) AS ym,
+        SELECT SUBSTR(date, 1, 7) AS ym,
                SUM(CASE WHEN type='income' THEN amount ELSE 0 END) AS income,
                SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) AS expense
         FROM transactions
         WHERE type != 'transfer'
-        GROUP BY ym
-        ORDER BY ym DESC
+        GROUP BY SUBSTR(date, 1, 7)
+        ORDER BY SUBSTR(date, 1, 7) DESC
         LIMIT ?
     """,
         (months,),
